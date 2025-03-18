@@ -240,11 +240,9 @@ async function streamToFile(stream, filePath) {
 function runFFmpegWithProgress(inputFile, outputFile, useCPU) {
   return new Promise((resolve, reject) => {
     const codecParam = useCPU ? 'libx264' : 'h264_nvenc';
-    const GPUCodec = useCPU ? '' : '-hwaccel nvdec';
 
-    // Add progress parameter to output to stdout
+    // Simplified arguments without hardware acceleration
     const ffmpegArgs = [
-      ...(GPUCodec ? GPUCodec.split(' ') : []),
       '-c:v',
       'hevc',
       '-i',
@@ -265,6 +263,9 @@ function runFFmpegWithProgress(inputFile, outputFile, useCPU) {
     let duration = 0;
     let currentTime = 0;
     let lastProgressUpdate = Date.now();
+    let frameCount = 0;
+    let fps = 0;
+    let speed = 0;
 
     // Process FFmpeg output
     ffmpeg.stderr.on('data', (data) => {
@@ -278,7 +279,20 @@ function runFFmpegWithProgress(inputFile, outputFile, useCPU) {
           const minutes = parseInt(durationMatch[2]);
           const seconds = parseFloat(durationMatch[3]);
           duration = hours * 3600 + minutes * 60 + seconds;
+          console.log(`📏 Video duration: ${formatTime(duration)}`);
         }
+      }
+
+      // Extract fps information
+      const fpsMatch = output.match(/(\d+\.?\d*) fps/);
+      if (fpsMatch) {
+        fps = parseFloat(fpsMatch[1]);
+      }
+
+      // Extract speed information
+      const speedMatch = output.match(/speed=(\d+\.?\d*)x/);
+      if (speedMatch) {
+        speed = parseFloat(speedMatch[1]);
       }
     });
 
@@ -294,16 +308,28 @@ function runFFmpegWithProgress(inputFile, outputFile, useCPU) {
         const seconds = parseFloat(timeMatch[3]);
         currentTime = hours * 3600 + minutes * 60 + seconds;
 
-        // Update progress every 2 seconds to avoid console spam
+        // Extract frame information
+        const frameMatch = output.match(/frame=(\d+)/);
+        if (frameMatch) {
+          frameCount = parseInt(frameMatch[1]);
+        }
+
+        // Update progress every second
         const now = Date.now();
-        if (now - lastProgressUpdate > 2000 && duration > 0) {
+        if (now - lastProgressUpdate > 1000 && duration > 0) {
           lastProgressUpdate = now;
           const progress = Math.min(100, Math.round((currentTime / duration) * 100));
           const remainingTime = duration - currentTime;
+          const estimatedTimeLeft = speed > 0 ? remainingTime / speed : remainingTime;
+
           console.log(
-            `📊 FFmpeg progress: ${progress}% (${formatTime(currentTime)}/${formatTime(
-              duration
-            )}, ETA: ${formatTime(remainingTime)})`
+            `
+📊 FFmpeg Progress:
+   ▶️ ${progress}% complete (${formatTime(currentTime)}/${formatTime(duration)})
+   🖼️ Frame: ${frameCount}${fps > 0 ? `, FPS: ${fps.toFixed(1)}` : ''}
+   ⏱️ Speed: ${speed.toFixed(2)}x
+   🕒 ETA: ${formatTime(estimatedTimeLeft)}
+          `.trim()
           );
         }
       }
