@@ -4,13 +4,23 @@ import {
   HeadObjectCommand,
   PutObjectCommand,
 } from '@aws-sdk/client-s3';
-import { exec } from 'child_process';
-import { createWriteStream, existsSync } from 'fs';
+import { exec, spawn } from 'child_process';
+import { appendFileSync, createWriteStream, existsSync, writeFileSync } from 'fs';
 import { mkdir, access, readFile, unlink } from 'fs/promises';
 import * as path from 'path';
 import { google } from 'googleapis';
 import fs from 'fs';
 import util from 'util';
+import readline from 'readline';
+
+//command line arguments
+const args = process.argv.slice(2);
+const currentInstance = parseInt(args[0] || '0', 10); // Default to 0 if not specified
+const totalInstances = parseInt(args[1] || '1', 10); // Default to 1 if not specified
+const useCPU = args[2] === 'cpu'; // Use 'cpu' as third parameter to use CPU encoding
+
+console.log(`🔢 Running as instance ${currentInstance} of ${totalInstances}`);
+console.log(`🖥️ Using ${useCPU ? 'CPU (libx264)' : 'GPU (h264_nvenc)'} for encoding`);
 
 // Convert exec to Promise
 const execPromise = util.promisify(exec);
@@ -30,11 +40,35 @@ function extractCameraId(filePath) {
   return 'other-videos'; // Default folder name if no camera ID found
 }
 
+async function initErrorLog() {
+  const errorLogFile = 'error_transcode.txt';
+
+  if (!existsSync(errorLogFile)) {
+    try {
+      // Create the file with header
+      const timestamp = new Date().toISOString();
+      const header = `Transcoding Error Log - Created at ${timestamp}\n`;
+      writeFileSync(errorLogFile, header);
+      console.log(`📝 Created error log file: ${errorLogFile}`);
+    } catch (err) {
+      console.error(`❌ Failed to create error log file: ${err.message}`);
+    }
+  }
+}
+
 function logError(message, filePath) {
-  const timestamp = new Date().toISOString();
-  const logEntry = `${timestamp} - ${filePath} - ${message}\n`;
   try {
-    appendFileSync('error_transcode.txt', logEntry);
+    // Use the full file path instead of just the filename
+    if (!existsSync('error_transcode.txt')) {
+      // Create file with header if it doesn't exist
+      const timestamp = new Date().toISOString();
+      const header = `Transcoding Error Log - Created at ${timestamp}\n`;
+      writeFileSync('error_transcode.txt', header);
+    }
+
+    // Just write the full file path, one per line
+    appendFileSync('error_transcode.txt', `${filePath}\n`);
+    console.error(`❌ Added to error log: ${filePath}`);
   } catch (err) {
     console.error('Failed to write to error log:', err);
   }
@@ -90,7 +124,6 @@ async function findOrCreateFolder(drive, parentFolderId, folderName) {
   }
 }
 
-// Add verification for Google Drive folder
 async function verifyGoogleDriveFolder(drive, folderId) {
   try {
     // Use files.get instead of drives.get
@@ -203,12 +236,111 @@ async function streamToFile(stream, filePath) {
   });
 }
 
-async function processFile(client, drive, INPUT_KEY) {
+// New function to run FFmpeg with progress monitoring
+function runFFmpegWithProgress(inputFile, outputFile, useCPU) {
+  return new Promise((resolve, reject) => {
+    const codecParam = useCPU ? 'libx264' : 'h264_nvenc';
+    const GPUCodec = useCPU ? '' : '-hwaccel nvdec';
+
+    // Add progress parameter to output to stdout
+    const ffmpegArgs = [
+      ...(GPUCodec ? GPUCodec.split(' ') : []),
+      '-c:v',
+      'hevc',
+      '-i',
+      inputFile,
+      '-c:v',
+      codecParam,
+      '-progress',
+      'pipe:1',
+      '-y',
+      outputFile,
+    ];
+
+    console.log(`🔄 Using encoder: ${codecParam}`);
+    console.log(`🎬 FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
+
+    const ffmpeg = spawn('ffmpeg', ffmpegArgs);
+
+    let duration = 0;
+    let currentTime = 0;
+    let lastProgressUpdate = Date.now();
+
+    // Process FFmpeg output
+    ffmpeg.stderr.on('data', (data) => {
+      const output = data.toString();
+
+      // Extract duration if we don't have it yet
+      if (duration === 0) {
+        const durationMatch = output.match(/Duration: (\d{2}):(\d{2}):(\d{2}.\d{2})/);
+        if (durationMatch) {
+          const hours = parseInt(durationMatch[1]);
+          const minutes = parseInt(durationMatch[2]);
+          const seconds = parseFloat(durationMatch[3]);
+          duration = hours * 3600 + minutes * 60 + seconds;
+        }
+      }
+    });
+
+    // Process FFmpeg progress info
+    ffmpeg.stdout.on('data', (data) => {
+      const output = data.toString();
+
+      // Extract current time
+      const timeMatch = output.match(/out_time=(\d{2}):(\d{2}):(\d{2}.\d{2})/);
+      if (timeMatch) {
+        const hours = parseInt(timeMatch[1]);
+        const minutes = parseInt(timeMatch[2]);
+        const seconds = parseFloat(timeMatch[3]);
+        currentTime = hours * 3600 + minutes * 60 + seconds;
+
+        // Update progress every 2 seconds to avoid console spam
+        const now = Date.now();
+        if (now - lastProgressUpdate > 2000 && duration > 0) {
+          lastProgressUpdate = now;
+          const progress = Math.min(100, Math.round((currentTime / duration) * 100));
+          const remainingTime = duration - currentTime;
+          console.log(
+            `📊 FFmpeg progress: ${progress}% (${formatTime(currentTime)}/${formatTime(
+              duration
+            )}, ETA: ${formatTime(remainingTime)})`
+          );
+        }
+      }
+    });
+
+    ffmpeg.on('close', (code) => {
+      if (code === 0) {
+        console.log('✅ Transcoding completed successfully (100%)');
+        resolve();
+      } else {
+        reject(new Error(`FFmpeg exited with code ${code}`));
+      }
+    });
+
+    ffmpeg.on('error', (err) => {
+      reject(new Error(`FFmpeg process error: ${err.message}`));
+    });
+  });
+}
+
+// Format time in seconds to HH:MM:SS
+function formatTime(seconds) {
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs
+    .toString()
+    .padStart(2, '0')}`;
+}
+
+async function processFile(client, drive, INPUT_KEY, fileIndex, totalFiles) {
   try {
+    console.log(`\n🔄 Processing file ${fileIndex}/${totalFiles}: ${INPUT_KEY}`);
+
     const keyPath = INPUT_KEY.slice(0, INPUT_KEY.lastIndexOf('.'));
     const convertedKey = `${keyPath}_converted.mp4`;
     const fileName = path.basename(convertedKey);
-    console.log(`\n🔄 Processing: ${INPUT_KEY}`);
     console.log(`🚀 Output file: ${convertedKey}`);
 
     // Check if converted file already exists in S3
@@ -256,13 +388,11 @@ async function processFile(client, drive, INPUT_KEY) {
       console.log(`📁 Using existing local file: ${INPUT_KEY}`);
     }
 
-    // Transcode the video
+    // Transcode the video with progress monitoring
     console.log(`🎬 Starting transcoding: ${INPUT_KEY}`);
     try {
-      const { stdout, stderr } = await execPromise(
-        `ffmpeg -c:v hevc -i "${INPUT_KEY}" -c:v libx264 "${convertedKey}" -y`
-      );
-      console.log('✅ Transcoding completed successfully');
+      // Use the new function with progress reporting
+      await runFFmpegWithProgress(INPUT_KEY, convertedKey, useCPU);
 
       // Upload to Google Drive
       if (drive) {
@@ -314,6 +444,8 @@ async function processFile(client, drive, INPUT_KEY) {
 }
 
 async function transcodeFile() {
+  await initErrorLog();
+
   const client = new S3Client({ region: REGION });
   let drive = null;
 
@@ -340,19 +472,28 @@ async function transcodeFile() {
     // Read the ID list file
     console.log('📄 Reading file list');
     const fileContent = await readFile('id_list.txt', 'utf-8');
-    const keyListToProcess = fileContent
+    const allFiles = fileContent
       .split(',')
       .map((id) => id.trim())
       .filter((id) => id.length > 0);
 
-    console.log(`📋 Found ${keyListToProcess.length} files to process`);
+    // Filter files based on instance parameters
+    const keyListToProcess = allFiles.filter(
+      (_, index) => index % totalInstances === currentInstance
+    );
 
-    // Process each file one by one
-    for (const INPUT_KEY of keyListToProcess) {
-      await processFile(client, drive, INPUT_KEY);
+    console.log(`📋 Total files found: ${allFiles.length}`);
+    console.log(
+      `📋 This instance (${currentInstance}) will process: ${keyListToProcess.length} files`
+    );
+
+    // Process each file one by one with file number tracking
+    for (let i = 0; i < keyListToProcess.length; i++) {
+      const fileNumber = i + 1;
+      await processFile(client, drive, keyListToProcess[i], fileNumber, keyListToProcess.length);
     }
 
-    console.log('✅ All processing completed');
+    console.log('✅ All processing completed for instance', currentInstance);
   } catch (error) {
     console.error('❌ Error reading id_list.txt:', error);
   }
