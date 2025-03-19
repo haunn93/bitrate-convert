@@ -22,15 +22,12 @@ const useCPU = args[2] === 'cpu'; // Use 'cpu' as third parameter to use CPU enc
 console.log(`🔢 Running as instance ${currentInstance} of ${totalInstances}`);
 console.log(`🖥️ Using ${useCPU ? 'CPU (libx264)' : 'GPU (h264_nvenc)'} for encoding`);
 
-// Convert exec to Promise
-const execPromise = util.promisify(exec);
-
 const BUCKET = process.env.BUCKET || 'prod.kineticeye.io.s3.us-east-1.land-vdr';
 console.log('🚀 ~ BUCKET:', BUCKET);
 const REGION = process.env.REGION || 'us-east-1';
 console.log('🚀 ~ REGION:', REGION);
 const GOOGLE_DRIVE_FOLDER_ID =
-  process.env.GOOGLE_DRIVE_FOLDER_ID || '1eCTT4AwuGTFPiwVfI5_Hijg7SdqIvK9O';
+  process.env.GOOGLE_DRIVE_FOLDER_ID || '17EhCJyZmgKDFn8RxlXbRlmBug_lzn0pW';
 
 function extractCameraId(filePath) {
   const matches = filePath.match(/camera-(\d+)/);
@@ -154,25 +151,89 @@ async function verifyGoogleDriveFolder(drive, folderId) {
 
 async function setupGoogleDrive() {
   try {
-    // Read credentials from file
-    const content = await readFile('google-credentials.json');
+    // Read OAuth credentials from file
+    const content = await readFile('oauth-credentials.json');
     const credentials = JSON.parse(content);
-    console.log(`Using Google service account: ${credentials.client_email}`);
+    console.log(
+      `Using OAuth client: ${
+        credentials.web ? credentials.web.client_id : credentials.installed.client_id
+      }`
+    );
 
-    // Create auth client from service account
-    const auth = new google.auth.GoogleAuth({
-      credentials,
-      scopes: [
+    const oauth2Client = new google.auth.OAuth2(
+      credentials.web ? credentials.web.client_id : credentials.installed.client_id,
+      credentials.web ? credentials.web.client_secret : credentials.installed.client_secret,
+      credentials.web ? credentials.web.redirect_uris[0] : credentials.installed.redirect_uris[0]
+    );
+
+    // Check if we have stored tokens
+    let tokens;
+    try {
+      const tokenContent = await readFile('oauth-tokens.json');
+      tokens = JSON.parse(tokenContent);
+      console.log('Found stored OAuth tokens');
+    } catch (err) {
+      console.log('No stored tokens found, need to authorize');
+      tokens = await getNewTokens(oauth2Client);
+    }
+
+    // Set the credentials
+    oauth2Client.setCredentials(tokens);
+
+    // Save refresh token workflow if needed
+    oauth2Client.on('tokens', (newTokens) => {
+      if (newTokens.refresh_token) {
+        // Store new tokens
+        const updatedTokens = { ...tokens, ...newTokens };
+        fs.writeFileSync('oauth-tokens.json', JSON.stringify(updatedTokens, null, 2));
+        console.log('New OAuth tokens saved');
+      }
+    });
+
+    return google.drive({ version: 'v3', auth: oauth2Client });
+  } catch (error) {
+    console.error('Error setting up Google Drive:', error);
+    return null;
+  }
+}
+
+async function getNewTokens(oauth2Client) {
+  return new Promise((resolve, reject) => {
+    // Generate the authorization URL
+    const authUrl = oauth2Client.generateAuthUrl({
+      access_type: 'offline',
+      scope: [
         'https://www.googleapis.com/auth/drive.file',
         'https://www.googleapis.com/auth/drive.metadata.readonly',
       ],
     });
 
-    return google.drive({ version: 'v3', auth });
-  } catch (error) {
-    console.error('Error setting up Google Drive:', error);
-    return null;
-  }
+    console.log('Authorize this app by visiting this URL:', authUrl);
+
+    // Set up readline interface to get authorization code from user
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    rl.question('Enter the code from that page here: ', async (code) => {
+      rl.close();
+      try {
+        // Exchange auth code for tokens
+        const { tokens } = await oauth2Client.getToken(code);
+        console.log('OAuth tokens obtained successfully');
+
+        // Save tokens to file for future use
+        fs.writeFileSync('oauth-tokens.json', JSON.stringify(tokens, null, 2));
+        console.log('OAuth tokens saved to oauth-tokens.json');
+
+        resolve(tokens);
+      } catch (err) {
+        console.error('Error retrieving access token:', err);
+        reject(err);
+      }
+    });
+  });
 }
 
 async function uploadToGoogleDrive(drive, filePath, folderId) {
