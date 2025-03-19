@@ -27,7 +27,7 @@ console.log('🚀 ~ BUCKET:', BUCKET);
 const REGION = process.env.REGION || 'us-east-1';
 console.log('🚀 ~ REGION:', REGION);
 const GOOGLE_DRIVE_FOLDER_ID =
-  process.env.GOOGLE_DRIVE_FOLDER_ID || '17EhCJyZmgKDFn8RxlXbRlmBug_lzn0pW';
+  process.env.GOOGLE_DRIVE_FOLDER_ID || '1eCTT4AwuGTFPiwVfI5_Hijg7SdqIvK9O';
 
 function extractCameraId(filePath) {
   const matches = filePath.match(/camera-(\d+)/);
