@@ -377,11 +377,22 @@ async function processFile(client, drive, INPUT_KEY, fileIndex, totalFiles) {
         const fileExists = await checkFileExistsInDrive(drive, cameraFolderId, fileName);
         if (fileExists) {
           console.log(`⏭️ Skip: ${fileName} already exists in Google Drive folder ${cameraFolder}`);
+          if (existsSync(INPUT_KEY)) {
+            await unlink(INPUT_KEY);
+            console.log(`✅ Deleted local file: ${INPUT_KEY}`);
+          }
+          if (existsSync(convertedKey)) {
+            await unlink(convertedKey);
+            console.log(`✅ Deleted local file: ${convertedKey}`);
+          }
+          console.log(`✅ Deleted local file: ${convertedKey}`);
+          logError(`File already exists in Google Drive: ${fileName}`, INPUT_KEY);
           return;
         }
       }
     }
 
+    let downloadedFile = false;
     // Download the file if needed
     if (!existsSync(INPUT_KEY)) {
       console.log(`⬇️ Downloading: ${INPUT_KEY} from S3`);
@@ -394,6 +405,7 @@ async function processFile(client, drive, INPUT_KEY, fileIndex, totalFiles) {
         );
         await streamToFile(Body, INPUT_KEY);
         console.log('✅ Downloaded S3 file successfully');
+        downloadedFile = true;
       } catch (downloadError) {
         console.error(`❌ Download error: ${downloadError.message}`);
         logError(`Download error: ${downloadError.message}`, INPUT_KEY);
@@ -403,11 +415,13 @@ async function processFile(client, drive, INPUT_KEY, fileIndex, totalFiles) {
       console.log(`📁 Using existing local file: ${INPUT_KEY}`);
     }
 
+    let transcodeSuccess = false;
     // Transcode the video with progress monitoring
     console.log(`🎬 Starting transcoding: ${INPUT_KEY}`);
     try {
       // Use the new function with progress reporting
       await runFFmpegWithProgress(INPUT_KEY, convertedKey, useCPU);
+      transcodeSuccess = true;
 
       // Upload to Google Drive
       if (drive) {
@@ -437,20 +451,30 @@ async function processFile(client, drive, INPUT_KEY, fileIndex, totalFiles) {
           logError(`Google Drive upload failed: ${driveError.message}`, INPUT_KEY);
         }
       }
-
-      // Clean up local files
+    } catch (transcodeError) {
+      console.error(`❌ Transcode error: ${transcodeError}`);
+      logError(`Transcode error: ${transcodeError.message}`, INPUT_KEY);
+    } finally {
+      // Clean up local files regardless of success or failure
       console.log('🧹 Cleaning up local files');
       try {
-        await unlink(INPUT_KEY);
-        await unlink(convertedKey);
-        console.log('✅ Deleted local files');
+        // Only delete input file if we downloaded it or transcoding succeeded
+        if (downloadedFile || transcodeSuccess) {
+          if (existsSync(INPUT_KEY)) {
+            await unlink(INPUT_KEY);
+            console.log(`✅ Deleted input file: ${INPUT_KEY}`);
+          }
+        }
+
+        // Delete output file if it exists (regardless of success)
+        if (existsSync(convertedKey)) {
+          await unlink(convertedKey);
+          console.log(`✅ Deleted output file: ${convertedKey}`);
+        }
       } catch (unlinkError) {
         console.error('❌ Failed to delete local files:', unlinkError);
         logError(`Failed to delete local files: ${unlinkError.message}`, INPUT_KEY);
       }
-    } catch (transcodeError) {
-      console.error(`❌ Transcode error: ${transcodeError}`);
-      logError(`Transcode error: ${transcodeError.message}`, INPUT_KEY);
     }
   } catch (error) {
     console.error('❌ Error processing file:', INPUT_KEY, error);
