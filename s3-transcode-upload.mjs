@@ -30,7 +30,7 @@ console.log('🚀 ~ BUCKET:', BUCKET);
 const REGION = process.env.REGION || 'us-east-1';
 console.log('🚀 ~ REGION:', REGION);
 const GOOGLE_DRIVE_FOLDER_ID =
-  process.env.GOOGLE_DRIVE_FOLDER_ID || '1_NNhuK3dgEKfyzB_GVFUpAMteD4TZ7JQ';
+  process.env.GOOGLE_DRIVE_FOLDER_ID || '17EhCJyZmgKDFn8RxlXbRlmBug_lzn0pW';
 
 function extractCameraId(filePath) {
   const matches = filePath.match(/camera-(\d+)/);
@@ -242,18 +242,7 @@ function runFFmpegWithProgress(inputFile, outputFile, useCPU) {
     const codecParam = useCPU ? 'libx264' : 'h264_nvenc';
 
     // Simplified arguments without hardware acceleration
-    const ffmpegArgs = [
-      '-c:v',
-      'hevc',
-      '-i',
-      inputFile,
-      '-c:v',
-      codecParam,
-      '-progress',
-      'pipe:1',
-      '-y',
-      outputFile,
-    ];
+    const ffmpegArgs = ['-c:v', 'hevc', '-i', inputFile, '-c:v', codecParam, '-y', outputFile];
 
     console.log(`🔄 Using encoder: ${codecParam}`);
     console.log(`🎬 FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
@@ -283,6 +272,21 @@ function runFFmpegWithProgress(inputFile, outputFile, useCPU) {
         }
       }
 
+      // Extract current time from stderr
+      const timeMatch = output.match(/time=(\d{2}):(\d{2}):(\d{2}.\d{2})/);
+      if (timeMatch) {
+        const hours = parseInt(timeMatch[1]);
+        const minutes = parseInt(timeMatch[2]);
+        const seconds = parseFloat(timeMatch[3]);
+        currentTime = hours * 3600 + minutes * 60 + seconds;
+      }
+
+      // Extract frame information from stderr
+      const frameMatch = output.match(/frame=\s*(\d+)/);
+      if (frameMatch) {
+        frameCount = parseInt(frameMatch[1]);
+      }
+
       // Extract fps information
       const fpsMatch = output.match(/(\d+\.?\d*) fps/);
       if (fpsMatch) {
@@ -294,45 +298,30 @@ function runFFmpegWithProgress(inputFile, outputFile, useCPU) {
       if (speedMatch) {
         speed = parseFloat(speedMatch[1]);
       }
+
+      // Update progress every second
+      const now = Date.now();
+      if (now - lastProgressUpdate > 1000 && duration > 0 && currentTime > 0) {
+        lastProgressUpdate = now;
+        const progress = Math.min(100, Math.round((currentTime / duration) * 100));
+        const remainingTime = duration - currentTime;
+        const estimatedTimeLeft = speed > 0 ? remainingTime / speed : remainingTime;
+
+        console.log(
+          `
+    📊 FFmpeg Progress:
+       ▶️ ${progress}% complete (${formatTime(currentTime)}/${formatTime(duration)})
+       🖼️ Frame: ${frameCount}${fps > 0 ? `, FPS: ${fps.toFixed(1)}` : ''}
+       ⏱️ Speed: ${speed.toFixed(2)}x
+       🕒 ETA: ${formatTime(estimatedTimeLeft)}
+          `.trim()
+        );
+      }
     });
 
     // Process FFmpeg progress info
     ffmpeg.stdout.on('data', (data) => {
-      const output = data.toString();
-
-      // Extract current time
-      const timeMatch = output.match(/out_time=(\d{2}):(\d{2}):(\d{2}.\d{2})/);
-      if (timeMatch) {
-        const hours = parseInt(timeMatch[1]);
-        const minutes = parseInt(timeMatch[2]);
-        const seconds = parseFloat(timeMatch[3]);
-        currentTime = hours * 3600 + minutes * 60 + seconds;
-
-        // Extract frame information
-        const frameMatch = output.match(/frame=(\d+)/);
-        if (frameMatch) {
-          frameCount = parseInt(frameMatch[1]);
-        }
-
-        // Update progress every second
-        const now = Date.now();
-        if (now - lastProgressUpdate > 1000 && duration > 0) {
-          lastProgressUpdate = now;
-          const progress = Math.min(100, Math.round((currentTime / duration) * 100));
-          const remainingTime = duration - currentTime;
-          const estimatedTimeLeft = speed > 0 ? remainingTime / speed : remainingTime;
-
-          console.log(
-            `
-📊 FFmpeg Progress:
-   ▶️ ${progress}% complete (${formatTime(currentTime)}/${formatTime(duration)})
-   🖼️ Frame: ${frameCount}${fps > 0 ? `, FPS: ${fps.toFixed(1)}` : ''}
-   ⏱️ Speed: ${speed.toFixed(2)}x
-   🕒 ETA: ${formatTime(estimatedTimeLeft)}
-          `.trim()
-          );
-        }
-      }
+      // Just in case ffmpeg outputs anything to stdout without the progress pipe
     });
 
     ffmpeg.on('close', (code) => {
