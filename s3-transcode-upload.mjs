@@ -27,7 +27,7 @@ console.log('🚀 ~ BUCKET:', BUCKET);
 const REGION = process.env.REGION || 'us-east-1';
 console.log('🚀 ~ REGION:', REGION);
 const GOOGLE_DRIVE_FOLDER_ID =
-  process.env.GOOGLE_DRIVE_FOLDER_ID || '1eCTT4AwuGTFPiwVfI5_Hijg7SdqIvK9O';
+  process.env.GOOGLE_DRIVE_FOLDER_ID || '17EhCJyZmgKDFn8RxlXbRlmBug_lzn0pW';
 
 function extractCameraId(filePath) {
   const matches = filePath.match(/camera-(\d+)/);
@@ -93,6 +93,8 @@ async function findOrCreateFolder(drive, parentFolderId, folderName) {
       q: `mimeType='application/vnd.google-apps.folder' and name='${folderName}' and '${parentFolderId}' in parents and trashed=false`,
       fields: 'files(id,name)',
       spaces: 'drive',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
     });
 
     // If folder found, return its ID
@@ -123,10 +125,19 @@ async function findOrCreateFolder(drive, parentFolderId, folderName) {
 
 async function verifyGoogleDriveFolder(drive, folderId) {
   try {
+    const response1 = await drive.files.list({
+      q: `'${folderId}' in parents and trashed=false`,
+      fields: 'files(id, name, mimeType, parents)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+    console.log(response1.data.files);
+
     // Use files.get instead of drives.get
     const response = await drive.files.get({
       fileId: folderId,
       fields: 'name,id,mimeType',
+      supportsAllDrives: true,
     });
 
     // Check if it's actually a folder
@@ -254,6 +265,8 @@ async function uploadToGoogleDrive(drive, filePath, folderId) {
       resource: fileMetadata,
       media: media,
       fields: 'id,webViewLink',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
     });
 
     console.log(`Uploaded to Google Drive: ${response.data.webViewLink}`);
