@@ -77,6 +77,8 @@ async function checkFileExistsInDrive(drive, folderId, fileName) {
       q: `'${folderId}' in parents and name='${fileName}' and trashed=false`,
       fields: 'files(id, name)',
       spaces: 'drive',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
     });
 
     return response.data.files && response.data.files.length > 0;
