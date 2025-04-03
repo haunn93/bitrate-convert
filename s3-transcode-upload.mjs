@@ -933,7 +933,16 @@ function runFFmpegWithProgress(inputFile, outputFile, useCPU) {
     const codecParam = useCPU ? 'libx264' : 'h264_nvenc';
 
     // Simplified arguments without hardware acceleration
-    const ffmpegArgs = ['-c:v', 'hevc', '-i', inputFile, '-c:v', codecParam, '-y', outputFile];
+    const ffmpegArgs = [
+      '-c:v',
+      'hevc',
+      '-i',
+      inputFile,
+      '-map 0:0 -c:v',
+      codecParam,
+      '-y',
+      outputFile,
+    ];
 
     console.log(`🔄 Using encoder: ${codecParam}`);
     console.log(`🎬 FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
