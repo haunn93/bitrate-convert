@@ -1,17 +1,12 @@
-import {
-  S3Client,
-  GetObjectCommand,
-  HeadObjectCommand,
-  PutObjectCommand,
-} from '@aws-sdk/client-s3';
-import { exec, spawn } from 'child_process';
-import { appendFileSync, createWriteStream, existsSync, writeFileSync } from 'fs';
-import { mkdir, access, readFile, unlink } from 'fs/promises';
-import * as path from 'path';
+import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { spawn } from 'child_process';
+import fs, { appendFileSync, createWriteStream, existsSync, writeFileSync } from 'fs';
+import { access, mkdir, readFile, unlink } from 'fs/promises';
 import { google } from 'googleapis';
-import fs from 'fs';
-import util from 'util';
+import * as path from 'path';
 import readline from 'readline';
+import dotenv from 'dotenv';
+dotenv.config();
 
 //command line arguments
 const args = process.argv.slice(2);
@@ -22,12 +17,489 @@ const useCPU = args[2] === 'cpu'; // Use 'cpu' as third parameter to use CPU enc
 console.log(`🔢 Running as instance ${currentInstance} of ${totalInstances}`);
 console.log(`🖥️ Using ${useCPU ? 'CPU (libx264)' : 'GPU (h264_nvenc)'} for encoding`);
 
-const BUCKET = process.env.BUCKET || 'prod.kineticeye.io.s3.us-east-1.land-vdr';
+const BUCKET = process.env.BUCKET;
 console.log('🚀 ~ BUCKET:', BUCKET);
-const REGION = process.env.REGION || 'us-east-1';
+const REGION = process.env.REGION;
 console.log('🚀 ~ REGION:', REGION);
-const GOOGLE_DRIVE_FOLDER_ID =
-  process.env.GOOGLE_DRIVE_FOLDER_ID || '17EhCJyZmgKDFn8RxlXbRlmBug_lzn0pW';
+const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
+
+// Add this option to your command line arguments at the top of the file
+const scanForDuplicates = args[3] === 'scan-duplicates';
+
+// Add this to your transcodeFile function, after drive is initialized
+
+async function scanGoogleDriveForDuplicates(drive, folderId) {
+  console.log('🔍 Scanning Google Drive for duplicate filenames...');
+
+  try {
+    // Get all files in the folder and subfolders
+    const files = await getAllFilesInFolder(drive, folderId);
+
+    // Create a map to track filenames and their occurrences
+    const fileMap = {};
+    const duplicates = [];
+
+    // Process each file
+    for (const file of files) {
+      if (!fileMap[file.name]) {
+        fileMap[file.name] = [
+          {
+            id: file.id,
+            name: file.name,
+            parentId: file.parents ? file.parents[0] : folderId,
+          },
+        ];
+      } else {
+        // This is a duplicate
+        fileMap[file.name].push({
+          id: file.id,
+          name: file.name,
+          parentId: file.parents ? file.parents[0] : folderId,
+        });
+
+        // Only add to duplicates array if this is the first duplicate found
+        if (fileMap[file.name].length === 2) {
+          duplicates.push(file.name);
+        }
+      }
+    }
+
+    // Log duplicate files
+    if (duplicates.length > 0) {
+      console.log(`🔄 Found ${duplicates.length} files with duplicate names in Google Drive`);
+
+      // List each duplicate with its locations
+      for (const name of duplicates) {
+        console.log(`\n📄 Duplicate: "${name}"`);
+        for (const instance of fileMap[name]) {
+          const parent = await getParentFolderName(drive, instance.parentId);
+          console.log(`   - ID: ${instance.id} (Folder: ${parent})`);
+        }
+      }
+
+      return fileMap;
+    } else {
+      console.log('✅ No duplicate filenames found in Google Drive');
+      return null;
+    }
+  } catch (error) {
+    console.error('❌ Error scanning for duplicates:', error.message);
+    return null;
+  }
+}
+
+// Helper function to get all files in a folder and its subfolders
+async function getAllFilesInFolder(drive, folderId) {
+  let allFiles = [];
+  let pageToken = null;
+
+  try {
+    do {
+      // Get files in current folder
+      const response = await drive.files.list({
+        q: `'${folderId}' in parents and trashed=false`,
+        fields: 'nextPageToken, files(id, name, mimeType, parents)',
+        pageToken: pageToken,
+        pageSize: 1000,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
+      });
+
+      // Process response
+      const files = response.data.files || [];
+      pageToken = response.data.nextPageToken;
+
+      // Add files to our list and recursively process subfolders
+      for (const file of files) {
+        if (file.mimeType === 'application/vnd.google-apps.folder') {
+          // Recursively get files from subfolder
+          const subfolderFiles = await getAllFilesInFolder(drive, file.id);
+          allFiles = allFiles.concat(subfolderFiles);
+        } else {
+          // Add file to our list
+          allFiles.push(file);
+        }
+      }
+    } while (pageToken);
+
+    return allFiles;
+  } catch (error) {
+    console.error(`Error getting files in folder ${folderId}:`, error.message);
+    return allFiles; // Return what we have so far
+  }
+}
+
+async function trashDuplicatesExceptFirst(drive, duplicateMap) {
+  let trashedCount = 0;
+  let permissionErrors = 0;
+  let notFoundErrors = 0;
+
+  // Get all file IDs to trash for batch processing
+  const fileIdsToTrash = [];
+  const fileInfoMap = {}; // Map file IDs to names for reporting
+
+  for (const fileName in duplicateMap) {
+    const instances = duplicateMap[fileName];
+    if (instances.length > 1) {
+      // Skip the first one, collect all others
+      for (let i = 1; i < instances.length; i++) {
+        fileIdsToTrash.push(instances[i].id);
+        fileInfoMap[instances[i].id] = {
+          name: fileName,
+          parentId: instances[i].parentId,
+        };
+      }
+    }
+  }
+
+  if (fileIdsToTrash.length === 0) {
+    console.log('🤷‍♂️ No duplicate files to trash');
+    return { trashedCount, permissionErrors, notFoundErrors };
+  }
+
+  console.log(`\n🔍 Found ${fileIdsToTrash.length} duplicate files to process`);
+
+  // Ask for confirmation
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  console.log(
+    '\n⚠️ WARNING: This will move all duplicate instances except the first one to trash.'
+  );
+  console.log(`   ${fileIdsToTrash.length} files will be moved to trash.`);
+  console.log('   Do you want to continue? (y/n)');
+
+  const confirm = await new Promise((resolve) => {
+    rl.question('> ', resolve);
+  });
+
+  rl.close();
+
+  if (confirm.toLowerCase() !== 'y') {
+    console.log('❌ Trash operation cancelled by user');
+    return { trashedCount, permissionErrors, notFoundErrors };
+  }
+
+  // Use batch trash for efficiency
+  console.log(`🗑️ Moving ${fileIdsToTrash.length} files to trash in batches...`);
+  const results = await batchTrashFiles(drive, fileIdsToTrash);
+
+  // Report results
+  console.log(`\n📊 Batch Trash Results:`);
+  console.log(`✅ Successfully trashed: ${results.success} files`);
+  console.log(`⚠️ Files not found: ${results.notFound}`);
+  console.log(`⛔ Permission denied: ${results.permissionDenied}`);
+
+  console.log(`\n🔔 Note: Trashed files can be recovered from Google Drive trash for 30 days`);
+
+  return results;
+}
+
+async function handleDuplicates(drive, duplicateMap) {
+  if (!duplicateMap) return;
+
+  let totalDuplicates = 0;
+  for (const fileName in duplicateMap) {
+    totalDuplicates += duplicateMap[fileName].length - 1;
+  }
+
+  console.log(
+    `\n📊 Found ${
+      Object.keys(duplicateMap).length
+    } files with duplicates (${totalDuplicates} total duplicates)`
+  );
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  // First ask if they want to verify files exist
+  console.log('\n🔍 Would you like to verify all files exist before proceeding? (y/n)');
+  console.log('   This can take a while for large numbers of files.');
+
+  const verifyAnswer = await new Promise((resolve) => {
+    rl.question('> ', resolve);
+  });
+
+  // If they want to verify, run the refresh
+  if (verifyAnswer.toLowerCase() === 'y') {
+    console.log('🔄 Refreshing duplicate file map...');
+    duplicateMap = await refreshDuplicateMap(drive, duplicateMap);
+  } else {
+    console.log('⏩ Skipping file verification.');
+  }
+
+  // Now ask about handling duplicates
+  console.log('\n🗑️ Would you like to handle duplicate files? (y/n)');
+
+  const answer = await new Promise((resolve) => {
+    rl.question('> ', resolve);
+  });
+
+  if (answer.toLowerCase() === 'y') {
+    console.log('\nOptions for handling duplicates:');
+    console.log('1️⃣ Keep newest version of each file (delete older duplicates)');
+    console.log('2️⃣ Keep first instance of each file (delete all duplicates)');
+    console.log('3️⃣ Rename duplicates to include parent folder name');
+    console.log('4️⃣ Move duplicates to trash instead of deleting');
+    console.log('5️⃣ List duplicates but take no action');
+
+    const action = await new Promise((resolve) => {
+      rl.question('Select option (1-5): ', resolve);
+    });
+
+    switch (action) {
+      case '1':
+        await deleteOlderDuplicates(drive, duplicateMap);
+        break;
+      case '2':
+        console.log('Skip verification and directly delete duplicates? (y/n)');
+        const skipVerify = await new Promise((resolve) => {
+          rl.question('> ', resolve);
+        });
+        await deleteAllDuplicatesExceptFirst(drive, duplicateMap, skipVerify.toLowerCase() === 'y');
+        break;
+      case '3':
+        await renameDuplicates(drive, duplicateMap);
+        break;
+      case '4':
+        await trashDuplicatesExceptFirst(drive, duplicateMap);
+        break;
+      case '5':
+      default:
+        console.log('📋 No action taken. List of duplicates generated.');
+        break;
+    }
+  }
+
+  rl.close();
+}
+
+// Helper function to delete older duplicates
+async function deleteOlderDuplicates(drive, duplicateMap) {
+  // This requires file creation date, which we need to fetch
+  // Implementation depends on comparing file metadata
+}
+
+// Helper function to delete all duplicates except first instance
+async function deleteAllDuplicatesExceptFirst(drive, duplicateMap, skipVerification = false) {
+  let deletedCount = 0;
+  let permissionErrors = 0;
+  let notFoundErrors = 0;
+
+  // Get all file IDs to delete for batch processing
+  const fileIdsToDelete = [];
+  const fileInfoMap = {}; // Map file IDs to names for reporting
+
+  for (const fileName in duplicateMap) {
+    const instances = duplicateMap[fileName];
+    if (instances.length > 1) {
+      // Skip the first one, collect all others
+      for (let i = 1; i < instances.length; i++) {
+        fileIdsToDelete.push(instances[i].id);
+        fileInfoMap[instances[i].id] = {
+          name: fileName,
+          parentId: instances[i].parentId,
+        };
+      }
+    }
+  }
+
+  if (fileIdsToDelete.length === 0) {
+    console.log('🤷‍♂️ No duplicate files to delete');
+    return { deletedCount, permissionErrors, notFoundErrors };
+  }
+
+  console.log(`\n🔍 Found ${fileIdsToDelete.length} duplicate files to process`);
+
+  // If not skipping verification, ask for confirmation
+  if (!skipVerification) {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    console.log('\n⚠️ WARNING: This will delete all duplicate instances except the first one.');
+    console.log(`   ${fileIdsToDelete.length} files will be permanently deleted.`);
+    console.log('   Do you want to continue? (y/n)');
+
+    const confirm = await new Promise((resolve) => {
+      rl.question('> ', resolve);
+    });
+
+    rl.close();
+
+    if (confirm.toLowerCase() !== 'y') {
+      console.log('❌ Deletion cancelled by user');
+      return { deletedCount, permissionErrors, notFoundErrors };
+    }
+  }
+
+  // Use batch delete for efficiency
+  console.log(`🗑️ Deleting ${fileIdsToDelete.length} files in batches...`);
+  const results = await batchDeleteFiles(drive, fileIdsToDelete);
+
+  // Report results
+  console.log(`\n📊 Batch Delete Results:`);
+  console.log(`✅ Successfully deleted: ${results.success} files`);
+  console.log(`⚠️ Files not found: ${results.notFound}`);
+  console.log(`⛔ Permission denied: ${results.permissionDenied}`);
+
+  return results;
+}
+
+async function refreshDuplicateMap(drive, duplicateMap) {
+  console.log(
+    `🔍 Verifying existence of ${Object.keys(duplicateMap).length} file types with duplicates...`
+  );
+  const refreshedMap = {};
+  let removedCount = 0;
+  let processedFiles = 0;
+  let totalFiles = 0;
+
+  // Count total files to process
+  for (const fileName in duplicateMap) {
+    totalFiles += duplicateMap[fileName].length;
+  }
+
+  // Process files with a timeout for the entire operation
+  const startTime = Date.now();
+  const timeout = 5 * 60 * 1000; // 5 minutes timeout
+
+  try {
+    for (const fileName in duplicateMap) {
+      // Check if overall operation is taking too long
+      if (Date.now() - startTime > timeout) {
+        console.warn(
+          `⚠️ Refresh operation taking too long (${Math.round(
+            (Date.now() - startTime) / 1000
+          )}s), returning partial results`
+        );
+        break;
+      }
+
+      refreshedMap[fileName] = [];
+
+      // Process each instance for this filename
+      for (const instance of duplicateMap[fileName]) {
+        processedFiles++;
+
+        // Show progress every 10 files
+        if (processedFiles % 10 === 0 || processedFiles === totalFiles) {
+          const percent = Math.round((processedFiles / totalFiles) * 100);
+          console.log(`🔄 Refreshing file map: ${percent}% (${processedFiles}/${totalFiles})`);
+        }
+
+        try {
+          // Use a promise with timeout to prevent hanging on a single request
+          const fileExists = await Promise.race([
+            drive.files
+              .get({
+                fileId: instance.id,
+                fields: 'id',
+                supportsAllDrives: true,
+              })
+              .then(() => true)
+              .catch((e) => {
+                if (e.message.includes('File not found')) return false;
+                throw e;
+              }),
+            new Promise((resolve) =>
+              setTimeout(() => {
+                console.warn(`⚠️ Timeout checking file ${instance.id}, assuming it exists`);
+                resolve(true);
+              }, 10000)
+            ), // 10 second timeout per file check
+          ]);
+
+          if (fileExists) {
+            refreshedMap[fileName].push(instance);
+          } else {
+            removedCount++;
+          }
+        } catch (error) {
+          console.error(`⚠️ Error checking file ${fileName} (${instance.id}):`, error.message);
+          // Include file in refreshed map even if we can't verify it
+          refreshedMap[fileName].push(instance);
+        }
+
+        // Add a small delay between API calls to avoid rate limiting
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      // If no instances remain, remove the entry entirely
+      if (refreshedMap[fileName].length === 0) {
+        delete refreshedMap[fileName];
+      }
+    }
+
+    const totalDuplicatesRemaining = Object.values(refreshedMap).reduce(
+      (acc, instances) => acc + instances.length,
+      0
+    );
+
+    console.log(`✅ Refresh complete: ${removedCount} stale files removed`);
+    console.log(
+      `📊 Remaining duplicates: ${totalDuplicatesRemaining} files across ${
+        Object.keys(refreshedMap).length
+      } filenames`
+    );
+
+    return refreshedMap;
+  } catch (error) {
+    console.error('❌ Error refreshing duplicate map:', error);
+    console.log('⚠️ Returning original duplicate map due to refresh error');
+    return duplicateMap; // Return original map on error
+  }
+}
+
+// Helper function to rename duplicates
+async function renameDuplicates(drive, duplicateMap) {
+  let renamedCount = 0;
+
+  for (const fileName in duplicateMap) {
+    const instances = duplicateMap[fileName];
+    if (instances.length > 1) {
+      // Skip the first instance, rename the others
+      for (let i = 1; i < instances.length; i++) {
+        try {
+          const parentFolder = await getParentFolderName(drive, instances[i].parentId);
+          const newName = `${fileName} (${parentFolder})`;
+
+          await drive.files.update({
+            fileId: instances[i].id,
+            resource: { name: newName },
+            supportsAllDrives: true,
+          });
+
+          console.log(`✏️ Renamed duplicate: ${fileName} → ${newName}`);
+          renamedCount++;
+        } catch (error) {
+          console.error(`❌ Error renaming file ${fileName}:`, error.message);
+        }
+      }
+    }
+  }
+
+  console.log(`✅ Renamed ${renamedCount} duplicate files`);
+}
+
+// Helper function to get folder name from ID
+async function getParentFolderName(drive, folderId) {
+  try {
+    const response = await drive.files.get({
+      fileId: folderId,
+      fields: 'name',
+      supportsAllDrives: true,
+    });
+    return response.data.name;
+  } catch (error) {
+    return `Unknown Folder (${folderId})`;
+  }
+}
 
 function extractCameraId(filePath) {
   const matches = filePath.match(/camera-(\d+)/);
@@ -80,6 +552,7 @@ async function checkFileExistsInDrive(drive, folderId, fileName) {
       supportsAllDrives: true,
       includeItemsFromAllDrives: true,
     });
+    console.log('🚀 ~ checkFileExistsInDrive ~ response:', response);
 
     return response.data.files && response.data.files.length > 0;
   } catch (error) {
@@ -98,6 +571,7 @@ async function findOrCreateFolder(drive, parentFolderId, folderName) {
       supportsAllDrives: true,
       includeItemsFromAllDrives: true,
     });
+    console.log('🚀 ~ findOrCreateFolder ~ response:', response);
 
     // If folder found, return its ID
     if (response.data.files && response.data.files.length > 0) {
@@ -115,6 +589,8 @@ async function findOrCreateFolder(drive, parentFolderId, folderName) {
     const folder = await drive.files.create({
       resource: fileMetadata,
       fields: 'id,name',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
     });
 
     console.log(`✅ Created new folder: ${folderName} (${folder.data.id})`);
@@ -215,10 +691,7 @@ async function getNewTokens(oauth2Client) {
     // Generate the authorization URL
     const authUrl = oauth2Client.generateAuthUrl({
       access_type: 'offline',
-      scope: [
-        'https://www.googleapis.com/auth/drive.file',
-        'https://www.googleapis.com/auth/drive.metadata.readonly',
-      ],
+      scope: ['https://www.googleapis.com/auth/drive'],
     });
 
     console.log('Authorize this app by visiting this URL:', authUrl);
@@ -247,6 +720,150 @@ async function getNewTokens(oauth2Client) {
       }
     });
   });
+}
+
+async function trashFile(drive, fileId) {
+  try {
+    await drive.files.update({
+      fileId: fileId,
+      resource: { trashed: true },
+      supportsAllDrives: true,
+    });
+    return true;
+  } catch (error) {
+    console.error(`Error trashing file ${fileId}: ${error.message}`);
+    return false;
+  }
+}
+
+async function batchTrashFiles(drive, fileIds) {
+  if (fileIds.length === 0) return { success: 0, notFound: 0, permissionDenied: 0 };
+
+  const results = {
+    success: 0,
+    notFound: 0,
+    permissionDenied: 0,
+    otherErrors: 0,
+  };
+
+  // Process in batches of 10 to avoid rate limits
+  const batchSize = 10;
+  for (let i = 0; i < fileIds.length; i += batchSize) {
+    const batch = fileIds.slice(i, i + batchSize);
+
+    // Show progress
+    console.log(
+      `🗑️ Trashing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(
+        fileIds.length / batchSize
+      )} (${i + 1}-${Math.min(i + batchSize, fileIds.length)}/${fileIds.length})`
+    );
+
+    const promises = batch.map((fileId) =>
+      drive.files
+        .update({
+          fileId,
+          resource: { trashed: true },
+          supportsAllDrives: true,
+        })
+        .then(() => ({ status: 'success', fileId }))
+        .catch((error) => {
+          if (error.message.includes('File not found')) {
+            return { status: 'notFound', fileId };
+          } else if (error.message.includes('permission')) {
+            return { status: 'permissionDenied', fileId };
+          } else {
+            return { status: 'error', fileId, error: error.message };
+          }
+        })
+    );
+
+    const batchResults = await Promise.all(promises);
+
+    for (const result of batchResults) {
+      switch (result.status) {
+        case 'success':
+          results.success++;
+          console.log(`✅ Trashed file ID: ${result.fileId}`);
+          break;
+        case 'notFound':
+          results.notFound++;
+          console.log(`⚠️ File not found: ${result.fileId}`);
+          break;
+        case 'permissionDenied':
+          results.permissionDenied++;
+          console.error(`⚠️ Permission denied for file ${result.fileId}`);
+          break;
+        default:
+          results.otherErrors++;
+          console.error(`❌ Error trashing file ${result.fileId}: ${result.error}`);
+      }
+    }
+
+    // Small delay between batches to avoid rate limits
+    if (i + batchSize < fileIds.length) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+
+  return results;
+}
+
+async function batchDeleteFiles(drive, fileIds) {
+  if (fileIds.length === 0) return { success: 0, notFound: 0, permissionDenied: 0 };
+
+  const results = {
+    success: 0,
+    notFound: 0,
+    permissionDenied: 0,
+  };
+
+  // Process in batches of 10 to avoid rate limits
+  const batchSize = 10;
+  for (let i = 0; i < fileIds.length; i += batchSize) {
+    const batch = fileIds.slice(i, i + batchSize);
+    const promises = batch.map((fileId) =>
+      drive.files
+        .delete({
+          fileId,
+          supportsAllDrives: true,
+        })
+        .then(() => ({ status: 'success', fileId }))
+        .catch((error) => {
+          if (error.message.includes('File not found')) {
+            return { status: 'notFound', fileId };
+          } else if (error.message.includes('permission')) {
+            return { status: 'permissionDenied', fileId };
+          } else {
+            return { status: 'error', fileId, error: error.message };
+          }
+        })
+    );
+
+    const batchResults = await Promise.all(promises);
+
+    for (const result of batchResults) {
+      switch (result.status) {
+        case 'success':
+          results.success++;
+          break;
+        case 'notFound':
+          results.notFound++;
+          break;
+        case 'permissionDenied':
+          results.permissionDenied++;
+          break;
+        default:
+          console.error(`Error with file ${result.fileId}: ${result.error}`);
+      }
+    }
+
+    // Small delay between batches to avoid rate limits
+    if (i + batchSize < fileIds.length) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+
+  return results;
 }
 
 async function uploadToGoogleDrive(drive, filePath, folderId) {
@@ -577,6 +1194,18 @@ async function transcodeFile() {
           '❌ Google Drive folder access failed. Continuing without Google Drive upload.'
         );
         drive = null;
+      }
+      if (scanForDuplicates) {
+        console.log('\n🔍 Starting Google Drive duplicate file scan...');
+        const duplicateMap = await scanGoogleDriveForDuplicates(drive, GOOGLE_DRIVE_FOLDER_ID);
+
+        if (duplicateMap) {
+          await handleDuplicates(drive, duplicateMap);
+          console.log('✅ Duplicate handling completed');
+        } else {
+          console.log('✅ No duplicates found, nothing to handle');
+        }
+        return; // Exit after scanning
       }
     }
   } catch (error) {
