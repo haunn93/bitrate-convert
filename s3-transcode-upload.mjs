@@ -1,11 +1,11 @@
 import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { spawn } from 'child_process';
+import { exec } from 'child_process';
+import dotenv from 'dotenv';
 import fs, { appendFileSync, createWriteStream, existsSync, writeFileSync } from 'fs';
 import { access, mkdir, readFile, unlink } from 'fs/promises';
 import { google } from 'googleapis';
 import * as path from 'path';
 import readline from 'readline';
-import dotenv from 'dotenv';
 dotenv.config();
 
 //command line arguments
@@ -932,109 +932,36 @@ function runFFmpegWithProgress(inputFile, outputFile, useCPU) {
   return new Promise((resolve, reject) => {
     const codecParam = useCPU ? 'libx264' : 'h264_nvenc';
 
-    // Simplified arguments without hardware acceleration
-    const ffmpegArgs = [
-      '-c:v',
-      'hevc',
-      '-i',
-      inputFile,
-      '-map 0:0 -c:v',
-      codecParam,
-      '-y',
-      outputFile,
-    ];
+    // Construct the FFmpeg command
+    const ffmpegCommand = `ffmpeg -c:v hevc -i "${inputFile}" -map 0:0 -c:v ${codecParam} -y "${outputFile}"`;
 
     console.log(`🔄 Using encoder: ${codecParam}`);
-    console.log(`🎬 FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
+    console.log(`🎬 FFmpeg command: ${ffmpegCommand}`);
 
-    const ffmpeg = spawn('ffmpeg', ffmpegArgs);
+    // Execute the FFmpeg command
+    const process = exec(ffmpegCommand, (error, stdout, stderr) => {
+      if (error) {
+        console.error(`❌ FFmpeg error: ${error.message}`);
+        reject(error);
+        return;
+      }
+      console.log(`✅ FFmpeg output: ${stdout}`);
+      resolve();
+    });
 
-    let duration = 0;
-    let currentTime = 0;
-    let lastProgressUpdate = Date.now();
-    let frameCount = 0;
-    let fps = 0;
-    let speed = 0;
-
-    // Process FFmpeg output
-    ffmpeg.stderr.on('data', (data) => {
+    // Capture progress from stderr
+    process.stderr.on('data', (data) => {
       const output = data.toString();
 
-      // Extract duration if we don't have it yet
-      if (duration === 0) {
-        const durationMatch = output.match(/Duration: (\d{2}):(\d{2}):(\d{2}.\d{2})/);
-        if (durationMatch) {
-          const hours = parseInt(durationMatch[1]);
-          const minutes = parseInt(durationMatch[2]);
-          const seconds = parseFloat(durationMatch[3]);
-          duration = hours * 3600 + minutes * 60 + seconds;
-          console.log(`📏 Video duration: ${formatTime(duration)}`);
-        }
-      }
-
-      // Extract current time from stderr
+      // Extract progress information
       const timeMatch = output.match(/time=(\d{2}):(\d{2}):(\d{2}.\d{2})/);
       if (timeMatch) {
         const hours = parseInt(timeMatch[1]);
         const minutes = parseInt(timeMatch[2]);
         const seconds = parseFloat(timeMatch[3]);
-        currentTime = hours * 3600 + minutes * 60 + seconds;
+        const currentTime = hours * 3600 + minutes * 60 + seconds;
+        console.log(`⏱️ Progress: ${formatTime(currentTime)}`);
       }
-
-      // Extract frame information from stderr
-      const frameMatch = output.match(/frame=\s*(\d+)/);
-      if (frameMatch) {
-        frameCount = parseInt(frameMatch[1]);
-      }
-
-      // Extract fps information
-      const fpsMatch = output.match(/(\d+\.?\d*) fps/);
-      if (fpsMatch) {
-        fps = parseFloat(fpsMatch[1]);
-      }
-
-      // Extract speed information
-      const speedMatch = output.match(/speed=(\d+\.?\d*)x/);
-      if (speedMatch) {
-        speed = parseFloat(speedMatch[1]);
-      }
-
-      // Update progress every second
-      const now = Date.now();
-      if (now - lastProgressUpdate > 1000 && duration > 0 && currentTime > 0) {
-        lastProgressUpdate = now;
-        const progress = Math.min(100, Math.round((currentTime / duration) * 100));
-        const remainingTime = duration - currentTime;
-        const estimatedTimeLeft = speed > 0 ? remainingTime / speed : remainingTime;
-
-        console.log(
-          `
-    📊 FFmpeg Progress:
-       ▶️ ${progress}% complete (${formatTime(currentTime)}/${formatTime(duration)})
-       🖼️ Frame: ${frameCount}${fps > 0 ? `, FPS: ${fps.toFixed(1)}` : ''}
-       ⏱️ Speed: ${speed.toFixed(2)}x
-       🕒 ETA: ${formatTime(estimatedTimeLeft)}
-          `.trim()
-        );
-      }
-    });
-
-    // Process FFmpeg progress info
-    ffmpeg.stdout.on('data', (data) => {
-      // Just in case ffmpeg outputs anything to stdout without the progress pipe
-    });
-
-    ffmpeg.on('close', (code) => {
-      if (code === 0) {
-        console.log('✅ Transcoding completed successfully (100%)');
-        resolve();
-      } else {
-        reject(new Error(`FFmpeg exited with code ${code}`));
-      }
-    });
-
-    ffmpeg.on('error', (err) => {
-      reject(new Error(`FFmpeg process error: ${err.message}`));
     });
   });
 }
