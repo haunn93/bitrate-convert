@@ -552,7 +552,6 @@ async function checkFileExistsInDrive(drive, folderId, fileName) {
       supportsAllDrives: true,
       includeItemsFromAllDrives: true,
     });
-    console.log('🚀 ~ checkFileExistsInDrive ~ response:', response);
 
     return response.data.files && response.data.files.length > 0;
   } catch (error) {
