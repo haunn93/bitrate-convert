@@ -571,7 +571,6 @@ async function findOrCreateFolder(drive, parentFolderId, folderName) {
       supportsAllDrives: true,
       includeItemsFromAllDrives: true,
     });
-    console.log('🚀 ~ findOrCreateFolder ~ response:', response);
 
     // If folder found, return its ID
     if (response.data.files && response.data.files.length > 0) {
