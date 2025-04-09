@@ -914,33 +914,75 @@ async function checkFileExistsInS3(client, bucket, key) {
 
 async function streamToFile(stream, filePath) {
   const directory = path.dirname(filePath);
-  // Check if directory exists and create it if not
   try {
     await access(directory);
   } catch {
     await mkdir(directory, { recursive: true });
   }
+
   return new Promise((resolve, reject) => {
-    const writeStream = createWriteStream(`${filePath}`);
+    const writeStream = createWriteStream(filePath);
+    let totalBytes = 0;
+    let downloadedBytes = 0;
+    let lastLogTime = Date.now();
+    const logInterval = 500; // Update every 500ms
+
+    if (stream.headers && stream.headers['content-length']) {
+      totalBytes = parseInt(stream.headers['content-length']);
+    }
+
+    stream.on('data', (chunk) => {
+      downloadedBytes += chunk.length;
+      const currentTime = Date.now();
+
+      if (currentTime - lastLogTime >= logInterval) {
+        if (totalBytes > 0) {
+          const progress = ((downloadedBytes / totalBytes) * 100).toFixed(1);
+          const downloaded = (downloadedBytes / (1024 * 1024)).toFixed(1);
+          const total = (totalBytes / (1024 * 1024)).toFixed(1);
+          process.stdout.write(`\r⬇️ Download: ${progress}% (${downloaded}MB / ${total}MB)`);
+        } else {
+          const downloaded = (downloadedBytes / (1024 * 1024)).toFixed(1);
+          process.stdout.write(`\r⬇️ Downloaded: ${downloaded}MB`);
+        }
+        lastLogTime = currentTime;
+      }
+    });
+
     stream.pipe(writeStream);
-    writeStream.on('finish', resolve);
+
+    writeStream.on('finish', () => {
+      const finalSize = (downloadedBytes / (1024 * 1024)).toFixed(1);
+      process.stdout.write(`\r✅ Download complete: ${finalSize}MB total\n`);
+      resolve();
+    });
+
     writeStream.on('error', reject);
+    stream.on('error', reject);
   });
 }
 
 // New function to run FFmpeg with progress monitoring
 function runFFmpegWithProgress(inputFile, outputFile, useCPU, executeMethod = 'exec') {
   return new Promise((resolve, reject) => {
+    const hwaccel = useCPU ? '' : '-hwaccel cuda';
     const codecParam = useCPU ? 'libx264' : 'h264_nvenc';
+    const ffmpegCommand = `ffmpeg ${hwaccel} -c:v hevc -i "${inputFile}" -map 0:0 -c:v ${codecParam} -strict -2 -y "${outputFile}"`;
 
-    // Construct the FFmpeg command
-    const ffmpegCommand = `ffmpeg -hwaccel cuda -c:v hevc -i "${inputFile}" -map 0:0 -c:v ${codecParam} -strict -2 -y "${outputFile}"`;
     console.log(`🔄 Using encoder: ${codecParam}`);
     console.log(`🎬 FFmpeg command: ${ffmpegCommand}`);
-    console.log(`📂 Execute Method: ${executeMethod}`);
+
+    const handleProgress = (data) => {
+      const output = data.toString();
+      const timeMatch = output.match(/time=(\d{2}):(\d{2}):(\d{2}.\d{2})/);
+      if (timeMatch) {
+        const [hours, minutes, seconds] = timeMatch.slice(1).map(Number);
+        const currentTime = hours * 3600 + minutes * 60 + seconds;
+        process.stdout.write(`\r⏱️ Transcoding Progress: ${formatTime(currentTime)}`);
+      }
+    };
 
     if (executeMethod === 'spawn') {
-      // Use spawn method
       const args = [
         '-hwaccel',
         'cuda',
@@ -959,24 +1001,10 @@ function runFFmpegWithProgress(inputFile, outputFile, useCPU, executeMethod = 'e
       ];
 
       const process = spawn('ffmpeg', args);
-
-      process.stdout.on('data', (data) => {
-        console.log(`✅ FFmpeg output: ${data}`);
-      });
-
-      process.stderr.on('data', (data) => {
-        const output = data.toString();
-        const timeMatch = output.match(/time=(\d{2}):(\d{2}):(\d{2}.\d{2})/);
-        if (timeMatch) {
-          const hours = parseInt(timeMatch[1]);
-          const minutes = parseInt(timeMatch[2]);
-          const seconds = parseFloat(timeMatch[3]);
-          const currentTime = hours * 3600 + minutes * 60 + seconds;
-          console.log(`⏱️ Progress: ${formatTime(currentTime)}`);
-        }
-      });
+      process.stderr.on('data', handleProgress);
 
       process.on('close', (code) => {
+        process.stdout.write('\n'); // New line after progress
         if (code === 0) {
           resolve();
         } else {
@@ -984,32 +1012,19 @@ function runFFmpegWithProgress(inputFile, outputFile, useCPU, executeMethod = 'e
         }
       });
 
-      process.on('error', (error) => {
-        reject(error);
-      });
+      process.on('error', reject);
     } else {
-      // Use exec method
       const process = exec(ffmpegCommand, (error, stdout, stderr) => {
+        process.stdout.write('\n'); // New line after progress
         if (error) {
           console.error(`❌ FFmpeg error: ${error.message}`);
           reject(error);
           return;
         }
-        console.log(`✅ FFmpeg output: ${stdout}`);
         resolve();
       });
 
-      process.stderr.on('data', (data) => {
-        const output = data.toString();
-        const timeMatch = output.match(/time=(\d{2}):(\d{2}):(\d{2}.\d{2})/);
-        if (timeMatch) {
-          const hours = parseInt(timeMatch[1]);
-          const minutes = parseInt(timeMatch[2]);
-          const seconds = parseFloat(timeMatch[3]);
-          const currentTime = hours * 3600 + minutes * 60 + seconds;
-          console.log(`⏱️ Progress: ${formatTime(currentTime)}`);
-        }
-      });
+      process.stderr.on('data', handleProgress);
     }
   });
 }
