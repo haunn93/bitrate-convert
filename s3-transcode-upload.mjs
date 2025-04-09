@@ -937,6 +937,7 @@ function runFFmpegWithProgress(inputFile, outputFile, useCPU, executeMethod = 'e
     const ffmpegCommand = `ffmpeg -hwaccel cuda -c:v hevc -i "${inputFile}" -map 0:0 -c:v ${codecParam} -strict -2 -y "${outputFile}"`;
     console.log(`🔄 Using encoder: ${codecParam}`);
     console.log(`🎬 FFmpeg command: ${ffmpegCommand}`);
+    console.log(`📂 Execute Method: ${executeMethod}`);
 
     if (executeMethod === 'spawn') {
       // Use spawn method
