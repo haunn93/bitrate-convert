@@ -933,7 +933,7 @@ function runFFmpegWithProgress(inputFile, outputFile, useCPU) {
     const codecParam = useCPU ? 'libx264' : 'h264_nvenc';
 
     // Construct the FFmpeg command
-    const ffmpegCommand = `ffmpeg -c:v hevc -i "${inputFile}" -map 0:0 -c:v ${codecParam} -strict -2 -y "${outputFile}"`;
+    const ffmpegCommand = `ffmpeg -hwaccel cuda -c:v hevc -i "${inputFile}" -map 0:0 -c:v ${codecParam} -strict -2 -y "${outputFile}"`;
     // const ffmpegCommand = `ffmpeg -i "${inputFile}" -c:v ${codecParam} -y -strict -2 "${outputFile}"`;
 
     console.log(`🔄 Using encoder: ${codecParam}`);
