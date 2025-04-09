@@ -1,5 +1,5 @@
 import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import dotenv from 'dotenv';
 import fs, { appendFileSync, createWriteStream, existsSync, writeFileSync } from 'fs';
 import { access, mkdir, readFile, unlink } from 'fs/promises';
