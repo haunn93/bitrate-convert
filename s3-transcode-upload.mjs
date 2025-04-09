@@ -13,6 +13,7 @@ const args = process.argv.slice(2);
 const currentInstance = parseInt(args[0] || '0', 10); // Default to 0 if not specified
 const totalInstances = parseInt(args[1] || '1', 10); // Default to 1 if not specified
 const useCPU = args[2] === 'cpu'; // Use 'cpu' as third parameter to use CPU encoding
+const executeMethod = args[3] || 'exec';
 
 console.log(`🔢 Running as instance ${currentInstance} of ${totalInstances}`);
 console.log(`🖥️ Using ${useCPU ? 'CPU (libx264)' : 'GPU (h264_nvenc)'} for encoding`);
@@ -928,42 +929,87 @@ async function streamToFile(stream, filePath) {
 }
 
 // New function to run FFmpeg with progress monitoring
-function runFFmpegWithProgress(inputFile, outputFile, useCPU) {
+function runFFmpegWithProgress(inputFile, outputFile, useCPU, executeMethod = 'exec') {
   return new Promise((resolve, reject) => {
     const codecParam = useCPU ? 'libx264' : 'h264_nvenc';
 
     // Construct the FFmpeg command
     const ffmpegCommand = `ffmpeg -hwaccel cuda -c:v hevc -i "${inputFile}" -map 0:0 -c:v ${codecParam} -strict -2 -y "${outputFile}"`;
-    // const ffmpegCommand = `ffmpeg -i "${inputFile}" -c:v ${codecParam} -y -strict -2 "${outputFile}"`;
-
     console.log(`🔄 Using encoder: ${codecParam}`);
     console.log(`🎬 FFmpeg command: ${ffmpegCommand}`);
 
-    // Execute the FFmpeg command
-    const process = exec(ffmpegCommand, (error, stdout, stderr) => {
-      if (error) {
-        console.error(`❌ FFmpeg error: ${error.message}`);
+    if (executeMethod === 'spawn') {
+      // Use spawn method
+      const args = [
+        '-hwaccel',
+        'cuda',
+        '-c:v',
+        'hevc',
+        '-i',
+        inputFile,
+        '-map',
+        '0:0',
+        '-c:v',
+        codecParam,
+        '-strict',
+        '-2',
+        '-y',
+        outputFile,
+      ];
+
+      const process = spawn('ffmpeg', args);
+
+      process.stdout.on('data', (data) => {
+        console.log(`✅ FFmpeg output: ${data}`);
+      });
+
+      process.stderr.on('data', (data) => {
+        const output = data.toString();
+        const timeMatch = output.match(/time=(\d{2}):(\d{2}):(\d{2}.\d{2})/);
+        if (timeMatch) {
+          const hours = parseInt(timeMatch[1]);
+          const minutes = parseInt(timeMatch[2]);
+          const seconds = parseFloat(timeMatch[3]);
+          const currentTime = hours * 3600 + minutes * 60 + seconds;
+          console.log(`⏱️ Progress: ${formatTime(currentTime)}`);
+        }
+      });
+
+      process.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`FFmpeg process exited with code ${code}`));
+        }
+      });
+
+      process.on('error', (error) => {
         reject(error);
-        return;
-      }
-      console.log(`✅ FFmpeg output: ${stdout}`);
-      resolve();
-    });
+      });
+    } else {
+      // Use exec method
+      const process = exec(ffmpegCommand, (error, stdout, stderr) => {
+        if (error) {
+          console.error(`❌ FFmpeg error: ${error.message}`);
+          reject(error);
+          return;
+        }
+        console.log(`✅ FFmpeg output: ${stdout}`);
+        resolve();
+      });
 
-    // Capture progress from stderr
-    process.stderr.on('data', (data) => {
-      const output = data.toString();
-
-      // Extract progress information
-      const timeMatch = output.match(/time=(\d{2}):(\d{2}):(\d{2}.\d{2})/);
-      if (timeMatch) {
-        const hours = parseInt(timeMatch[1]);
-        const minutes = parseInt(timeMatch[2]);
-        const seconds = parseFloat(timeMatch[3]);
-        const currentTime = hours * 3600 + minutes * 60 + seconds;
-        console.log(`⏱️ Progress: ${formatTime(currentTime)}`);
-      }
-    });
+      process.stderr.on('data', (data) => {
+        const output = data.toString();
+        const timeMatch = output.match(/time=(\d{2}):(\d{2}):(\d{2}.\d{2})/);
+        if (timeMatch) {
+          const hours = parseInt(timeMatch[1]);
+          const minutes = parseInt(timeMatch[2]);
+          const seconds = parseFloat(timeMatch[3]);
+          const currentTime = hours * 3600 + minutes * 60 + seconds;
+          console.log(`⏱️ Progress: ${formatTime(currentTime)}`);
+        }
+      });
+    }
   });
 }
 
@@ -977,7 +1023,14 @@ function formatTime(seconds) {
     .padStart(2, '0')}`;
 }
 
-async function processFile(client, drive, INPUT_KEY, fileIndex, totalFiles) {
+async function processFile(
+  client,
+  drive,
+  INPUT_KEY,
+  fileIndex,
+  totalFiles,
+  executeMethod = 'exec'
+) {
   try {
     console.log(`\n🔄 Processing file ${fileIndex}/${totalFiles}: ${INPUT_KEY}`);
 
@@ -1048,7 +1101,7 @@ async function processFile(client, drive, INPUT_KEY, fileIndex, totalFiles) {
     console.log(`🎬 Starting transcoding: ${INPUT_KEY}`);
     try {
       // Use the new function with progress reporting
-      await runFFmpegWithProgress(INPUT_KEY, convertedKey, useCPU);
+      await runFFmpegWithProgress(INPUT_KEY, convertedKey, useCPU, executeMethod);
       transcodeSuccess = true;
 
       // Upload to Google Drive
@@ -1169,7 +1222,14 @@ async function transcodeFile() {
     // Process each file one by one with file number tracking
     for (let i = 0; i < keyListToProcess.length; i++) {
       const fileNumber = i + 1;
-      await processFile(client, drive, keyListToProcess[i], fileNumber, keyListToProcess.length);
+      await processFile(
+        client,
+        drive,
+        keyListToProcess[i],
+        fileNumber,
+        keyListToProcess.length,
+        executeMethod
+      );
     }
 
     console.log('✅ All processing completed for instance', currentInstance);
