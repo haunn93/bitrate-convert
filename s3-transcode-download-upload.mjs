@@ -1,10 +1,11 @@
 import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import dotenv from 'dotenv';
-import { appendFileSync, createWriteStream, existsSync, writeFileSync } from 'fs';
+import { appendFileSync, createReadStream, createWriteStream, existsSync, writeFileSync } from 'fs';
 import { access, mkdir, readFile, unlink } from 'fs/promises';
 import { google } from 'googleapis';
 import * as path from 'path';
 import readline from 'readline';
+import { fileTypeFromFile } from 'file-type';
 dotenv.config();
 
 // Command line arguments
@@ -213,14 +214,17 @@ async function uploadToGoogleDrive(drive, filePath, folderId) {
   if (!drive) return null;
 
   try {
+    const fileType = await fileTypeFromFile(filePath);
+    const mimeType = fileType?.mime || 'video/mp4'; // fallback to video/mp4 if detection fails
+
     const fileMetadata = {
       name: path.basename(filePath),
       parents: [folderId],
     };
 
     const media = {
-      mimeType: 'video/mp4',
-      body: createWriteStream(filePath),
+      mimeType: mimeType,
+      body: createReadStream(filePath),
     };
 
     const response = await drive.files.create({
