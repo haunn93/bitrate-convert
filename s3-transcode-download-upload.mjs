@@ -249,6 +249,7 @@ async function processFile(client, drive, INPUT_KEY, fileIndex, totalFiles) {
     const cameraFolder = extractCameraId(INPUT_KEY);
     console.log(`📂 Using camera folder: ${cameraFolder}`);
     const fileName = path.basename(INPUT_KEY);
+    console.log('🚀 ~ processFile ~ fileName:', fileName);
     const cameraFolderId = await findOrCreateFolder(drive, GOOGLE_DRIVE_FOLDER_ID, cameraFolder);
     const fileExists = await checkFileExistsInDrive(drive, cameraFolderId, fileName);
     if (fileExists) {
