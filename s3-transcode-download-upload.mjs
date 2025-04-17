@@ -248,7 +248,7 @@ async function processFile(client, drive, INPUT_KEY, fileIndex, totalFiles) {
     console.log(`\n🔄 Processing file ${fileIndex}/${totalFiles}: ${INPUT_KEY}`);
     const cameraFolder = extractCameraId(INPUT_KEY);
     console.log(`📂 Using camera folder: ${cameraFolder}`);
-
+    const fileName = path.basename(INPUT_KEY);
     const cameraFolderId = await findOrCreateFolder(drive, GOOGLE_DRIVE_FOLDER_ID, cameraFolder);
     const fileExists = await checkFileExistsInDrive(drive, cameraFolderId, fileName);
     if (fileExists) {
@@ -257,11 +257,6 @@ async function processFile(client, drive, INPUT_KEY, fileIndex, totalFiles) {
         await unlink(INPUT_KEY);
         console.log(`✅ Deleted local file: ${INPUT_KEY}`);
       }
-      if (existsSync(convertedKey)) {
-        await unlink(convertedKey);
-        console.log(`✅ Deleted local file: ${convertedKey}`);
-      }
-      console.log(`✅ Deleted local file: ${convertedKey}`);
       logError(`File already exists in Google Drive: ${fileName}`, INPUT_KEY);
       return;
     }
