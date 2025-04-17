@@ -246,7 +246,25 @@ async function uploadToGoogleDrive(drive, filePath, folderId) {
 async function processFile(client, drive, INPUT_KEY, fileIndex, totalFiles) {
   try {
     console.log(`\n🔄 Processing file ${fileIndex}/${totalFiles}: ${INPUT_KEY}`);
+    const cameraFolder = extractCameraId(INPUT_KEY);
+    console.log(`📂 Using camera folder: ${cameraFolder}`);
 
+    const cameraFolderId = await findOrCreateFolder(drive, GOOGLE_DRIVE_FOLDER_ID, cameraFolder);
+    const fileExists = await checkFileExistsInDrive(drive, cameraFolderId, fileName);
+    if (fileExists) {
+      console.log(`⏭️ Skip: ${fileName} already exists in Google Drive folder ${cameraFolder}`);
+      if (existsSync(INPUT_KEY)) {
+        await unlink(INPUT_KEY);
+        console.log(`✅ Deleted local file: ${INPUT_KEY}`);
+      }
+      if (existsSync(convertedKey)) {
+        await unlink(convertedKey);
+        console.log(`✅ Deleted local file: ${convertedKey}`);
+      }
+      console.log(`✅ Deleted local file: ${convertedKey}`);
+      logError(`File already exists in Google Drive: ${fileName}`, INPUT_KEY);
+      return;
+    }
     // Download from S3
     if (!existsSync(INPUT_KEY)) {
       console.log(`⬇️ Downloading: ${INPUT_KEY} from S3`);
@@ -271,15 +289,6 @@ async function processFile(client, drive, INPUT_KEY, fileIndex, totalFiles) {
     // Upload to Google Drive
     if (drive) {
       try {
-        const cameraFolder = extractCameraId(INPUT_KEY);
-        console.log(`📂 Using camera folder: ${cameraFolder}`);
-
-        const cameraFolderId = await findOrCreateFolder(
-          drive,
-          GOOGLE_DRIVE_FOLDER_ID,
-          cameraFolder
-        );
-
         if (cameraFolderId) {
           console.log(`⬆️ Uploading to Google Drive folder: ${cameraFolder}`);
           await uploadToGoogleDrive(drive, INPUT_KEY, cameraFolderId);
@@ -305,6 +314,23 @@ async function processFile(client, drive, INPUT_KEY, fileIndex, totalFiles) {
   } catch (error) {
     console.error('❌ Error processing file:', INPUT_KEY, error);
     logError(`Error processing file: ${error.message}`, INPUT_KEY);
+  }
+}
+
+async function checkFileExistsInDrive(drive, folderId, fileName) {
+  try {
+    const response = await drive.files.list({
+      q: `'${folderId}' in parents and name='${fileName}' and trashed=false`,
+      fields: 'files(id, name)',
+      spaces: 'drive',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+
+    return response.data.files && response.data.files.length > 0;
+  } catch (error) {
+    console.error(`Error checking if file exists in Drive: ${error.message}`);
+    return false; // If there's an error, assume file doesn't exist
   }
 }
 
