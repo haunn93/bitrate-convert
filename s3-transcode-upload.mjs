@@ -971,6 +971,7 @@ function runFFmpegWithProgress(inputFile, outputFile, useCPU, executeMethod = 'e
 
     console.log(`🔄 Using encoder: ${codecParam}`);
     console.log(`🎬 FFmpeg command: ${ffmpegCommand}`);
+    console.log(`📂 Execute Method: ${executeMethod}`);
 
     const handleProgress = (data) => {
       const output = data.toString();
